@@ -1,5 +1,5 @@
 DOMAIN = "tuya_local_lan"
-PLATFORMS = ["switch", "lock"]
+PLATFORMS = ["switch", "lock", "sensor"]
 
 CONF_DEVICES = "devices"
 CONF_USERNAME = "username"
@@ -17,5 +17,6 @@ DEVICE_KIND_MULTI_SWITCH = "multi_switch"
 TCP_PORT = 6668
 UDP_PORTS = (6666, 6667)
 SCAN_INTERVAL_SECONDS = 15
+LAST_UNLOCK_SCAN_SECONDS = 300
 CONNECT_TIMEOUT = 8
 DISCOVERY_TIMEOUT = 5.0

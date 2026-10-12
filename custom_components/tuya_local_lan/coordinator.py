@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import CONF_DEVICES, SCAN_INTERVAL_SECONDS, TCP_PORT
+from .const import CONF_DEVICES, CONF_SESSION, SCAN_INTERVAL_SECONDS, TCP_PORT
 from .protocol import TuyaLanDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.entry = entry
+        self.session: dict[str, str] | None = entry.data.get(CONF_SESSION)
         self.devices: dict[str, DeviceRuntime] = {
             item["device_id"]: DeviceRuntime(item)
             for item in entry.data.get(CONF_DEVICES, [])

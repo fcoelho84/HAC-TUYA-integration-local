@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 import aiohttp
 from tuya_mobile import (
@@ -23,9 +24,28 @@ APP_CHOICES = {
     APP_TUYA_SMART: TuyaMobileApp.TUYA_SMART,
 }
 
+UNLOCK_CODE_HINTS = (
+    "unlock_",
+    "open_inside",
+    "door_opened",
+)
+ALARM_CODE_HINTS = (
+    "alarm",
+    "alarm_lock",
+    "doorbell",
+    "hijack",
+    "unlock_offline_clear",
+)
+
+T = TypeVar("T")
+
 
 class CloudAuthError(Exception):
     """Login or session failure."""
+
+
+class CloudApiError(Exception):
+    """Mobile API call failure after auth."""
 
 
 def _session_dict(mobile: TuyaMobileSession) -> dict[str, str]:
@@ -55,6 +75,16 @@ def _apply_session(client: TuyaPasswordClient, session_data: dict[str, str]) -> 
         uid=uid or None,
         endpoint=endpoint,
     )
+
+
+def _walk(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk(child)
 
 
 async def async_login(
@@ -129,21 +159,453 @@ async def async_list_with_session(
 
 
 async def _list_devices(client: TuyaPasswordClient) -> list[dict[str, Any]]:
-    records = await client.get_local_keys([])
-    out: list[dict[str, Any]] = []
-    for item in records:
-        device_id = item.get("device_id")
-        local_key = item.get("local_key")
-        if not device_id or not local_key:
-            continue
-        out.append(
-            {
-                "device_id": str(device_id),
-                "local_key": str(local_key),
-                "host": str(item.get("ip") or "") or None,
-                "name": item.get("name"),
-                "uuid": item.get("uuid"),
-                "is_online": item.get("is_online"),
-            }
+    homes = await client._call("m.life.home.space.list", {})
+    gids = {
+        obj.get("gid") or obj.get("groupId") or obj.get("homeId")
+        for obj in _walk(homes)
+        if obj.get("gid") or obj.get("groupId") or obj.get("homeId")
+    }
+    records: list[dict[str, Any]] = []
+    for gid in gids:
+        response = await client._call(
+            "m.life.my.group.device.list", {"gid": gid}, version="2.2"
         )
-    return out
+        for obj in _walk(response):
+            local_key = obj.get("localKey") or obj.get("local_key")
+            device_id = obj.get("devId") or obj.get("deviceId") or obj.get("id")
+            if not local_key or not device_id:
+                continue
+            records.append(
+                {
+                    "device_id": str(device_id),
+                    "local_key": str(local_key),
+                    "host": str(obj.get("ip") or obj.get("lanIp") or "") or None,
+                    "name": obj.get("name"),
+                    "uuid": obj.get("uuid"),
+                    "is_online": obj.get("isOnline", obj.get("cloudOnline")),
+                    "category": (
+                        obj.get("category")
+                        or obj.get("categoryCode")
+                        or obj.get("deviceType")
+                        or obj.get("categoryCodeNew")
+                    ),
+                    "product_id": obj.get("productId") or obj.get("product_id"),
+                    "product_name": obj.get("productName") or obj.get("product_name"),
+                }
+            )
+    unique = {
+        (item["device_id"], item["local_key"]): item for item in records
+    }
+    return list(unique.values())
+
+
+async def _with_client(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    runner: Callable[[TuyaPasswordClient], Awaitable[T]],
+) -> tuple[dict[str, str], T]:
+    application = APP_CHOICES.get(app)
+    if application is None:
+        raise CloudAuthError(f"unsupported app: {app}")
+
+    async with aiohttp.ClientSession() as http:
+        client = TuyaPasswordClient.for_application(
+            application,
+            http,
+            username=username,
+        )
+        if session_data and session_data.get("sid"):
+            try:
+                _apply_session(client, session_data)
+                return session_data, await runner(client)
+            except (CloudAuthError, CloudApiError):
+                raise
+            except Exception as err:
+                _LOGGER.info("saved session expired, re-login: %s", err)
+
+        try:
+            mobile = await client.login_with_password(
+                password, country_code=str(country_code).lstrip("+")
+            )
+        except TuyaMobileInvalidAuth as err:
+            raise CloudAuthError(str(err)) from err
+        except Exception as err:
+            raise CloudAuthError(str(err)) from err
+
+        session = _session_dict(mobile)
+        try:
+            return session, await runner(client)
+        except Exception as err:
+            raise CloudApiError(str(err)) from err
+
+
+def _schema_entries(device: Any) -> list[dict[str, Any]]:
+    if not isinstance(device, dict):
+        return []
+    schema = device.get("schema") or device.get("dpName") or []
+    if isinstance(schema, str):
+        return []
+    if isinstance(schema, dict):
+        out: list[dict[str, Any]] = []
+        for key, value in schema.items():
+            if isinstance(value, dict):
+                entry = dict(value)
+                entry.setdefault("id", value.get("id") or key)
+                entry.setdefault("code", value.get("code") or key)
+                out.append(entry)
+            else:
+                out.append({"id": key, "code": str(value)})
+        return out
+    if isinstance(schema, list):
+        return [item for item in schema if isinstance(item, dict)]
+    return []
+
+
+def _dp_ids_for_codes(
+    schema: list[dict[str, Any]],
+    hints: tuple[str, ...],
+) -> list[int]:
+    ids: list[int] = []
+    for entry in schema:
+        code = str(entry.get("code") or entry.get("dpCode") or "").lower()
+        if not code:
+            continue
+        if not any(code == hint or code.startswith(hint) for hint in hints):
+            continue
+        raw = entry.get("id") or entry.get("dpId")
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(ids))
+
+
+def _normalize_history(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"datas": [], "totalCount": 0, "hasNext": False, "raw": payload}
+    datas = payload.get("datas")
+    if datas is None and isinstance(payload.get("result"), dict):
+        nested = payload["result"]
+        datas = nested.get("datas")
+        payload = nested
+    if datas is None and isinstance(payload.get("result"), list):
+        datas = payload["result"]
+    return {
+        "datas": datas if isinstance(datas, list) else [],
+        "totalCount": payload.get("totalCount") or payload.get("total") or 0,
+        "hasNext": bool(payload.get("hasNext")),
+        "raw": payload,
+    }
+
+
+async def _device_detail(client: TuyaPasswordClient, device_id: str) -> dict[str, Any]:
+    for action in ("thing.m.device.get", "tuya.m.device.get", "m.device.get"):
+        try:
+            result = await client._call(action, {"devId": device_id})
+        except Exception as err:
+            _LOGGER.debug("device get %s via %s failed: %s", device_id, action, err)
+            continue
+        if isinstance(result, dict):
+            if isinstance(result.get("result"), dict):
+                return result["result"]
+            return result
+    return {}
+
+
+async def async_lock_unlock_history(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    dp_ids: list[int] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Unlock records via panel API tuya.m.scale.history.list."""
+
+    async def _run(client: TuyaPasswordClient) -> dict[str, Any]:
+        ids = list(dp_ids or [])
+        if not ids:
+            detail = await _device_detail(client, device_id)
+            ids = _dp_ids_for_codes(_schema_entries(detail), UNLOCK_CODE_HINTS)
+        if not ids:
+            raise CloudApiError("no unlock dp ids found for device")
+        raw = await client._call(
+            "tuya.m.scale.history.list",
+            {
+                "devId": device_id,
+                "dpIds": ids,
+                "offset": offset,
+                "limit": limit,
+                "startTime": 0,
+                "endTime": 0,
+            },
+            version="2.0",
+        )
+        out = _normalize_history(raw)
+        out["dp_ids"] = ids
+        return out
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+async def async_lock_alarm_history(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    dp_ids: list[int] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Alarm records via tuya.m.device.lock.alarm.list."""
+
+    async def _run(client: TuyaPasswordClient) -> dict[str, Any]:
+        ids = list(dp_ids or [])
+        if not ids:
+            detail = await _device_detail(client, device_id)
+            ids = _dp_ids_for_codes(_schema_entries(detail), ALARM_CODE_HINTS)
+        if not ids:
+            raise CloudApiError("no alarm dp ids found for device")
+        raw = await client._call(
+            "tuya.m.device.lock.alarm.list",
+            {
+                "devId": device_id,
+                "dpIds": ids,
+                "offset": offset,
+                "limit": limit,
+            },
+            version="1.0",
+        )
+        out = _normalize_history(raw)
+        out["dp_ids"] = ids
+        return out
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+async def async_temp_password_list(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Online temporary passwords: tuya.m.device.lock.temppwd.list."""
+
+    async def _run(client: TuyaPasswordClient) -> list[dict[str, Any]]:
+        raw = await client._call(
+            "tuya.m.device.lock.temppwd.list",
+            {"devId": device_id},
+            version="2.0",
+        )
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, dict):
+            result = raw.get("result", raw)
+            if isinstance(result, list):
+                return [item for item in result if isinstance(item, dict)]
+        return []
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+def _as_epoch(value: int) -> int:
+    """Panel APIs mix seconds and ms; keep seconds-sized values as-is."""
+    return int(value)
+
+
+async def async_temp_password_create(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    name: str,
+    temp_password: str,
+    effective_time: int,
+    invalid_time: int,
+    avail_time: int = 0,
+    phone: str | None = None,
+) -> tuple[dict[str, str], Any]:
+    """Create online temp password (panel plaintext password)."""
+
+    async def _run(client: TuyaPasswordClient) -> Any:
+        payload: dict[str, Any] = {
+            "devId": device_id,
+            "name": name,
+            "password": temp_password,
+            "effectiveTime": _as_epoch(effective_time),
+            "invalidTime": _as_epoch(invalid_time),
+            "availTime": int(avail_time),
+            "schedule": "",
+        }
+        if phone:
+            payload["phone"] = phone
+            payload["countryCode"] = str(country_code).lstrip("+")
+        last_err: Exception | None = None
+        for version in ("5.0", "4.0", "2.0", "1.0"):
+            try:
+                return await client._call(
+                    "tuya.m.device.lock.temppwd.create",
+                    payload,
+                    version=version,
+                )
+            except Exception as err:
+                last_err = err
+                _LOGGER.debug("temppwd.create v%s failed: %s", version, err)
+        assert last_err is not None
+        raise last_err
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+async def async_temp_password_delete(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    password_id: int | str,
+) -> tuple[dict[str, str], Any]:
+    """Delete online temp password."""
+
+    async def _run(client: TuyaPasswordClient) -> Any:
+        last_err: Exception | None = None
+        for action in (
+            "tuya.m.device.lock.temppwd.del",
+            "tuya.m.device.lock.temppwd.remove",
+        ):
+            try:
+                return await client._call(
+                    action,
+                    {"devId": device_id, "id": password_id},
+                    version="2.0",
+                )
+            except Exception as err:
+                last_err = err
+                _LOGGER.debug("%s failed: %s", action, err)
+        assert last_err is not None
+        raise last_err
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+async def async_offline_password_get(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    pwd_type: str = "1",
+    gmt_start: int = 0,
+    gmt_expired: int = 0,
+    pwd_name: str | None = None,
+) -> tuple[dict[str, str], Any]:
+    """Offline temp password (cloud generates digits)."""
+
+    async def _run(client: TuyaPasswordClient) -> Any:
+        payload: dict[str, Any] = {
+            "devId": device_id,
+            "pwdType": str(pwd_type),
+            "gmtStart": int(gmt_start),
+            "gmtExpired": int(gmt_expired),
+        }
+        if pwd_name:
+            payload["pwdName"] = pwd_name
+        return await client._call(
+            "tuya.m.device.lock.offlinepwd.get",
+            payload,
+            version="1.0",
+        )
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )
+
+
+async def async_offline_password_list(
+    *,
+    username: str,
+    password: str,
+    country_code: str,
+    app: str,
+    session_data: dict[str, str] | None,
+    device_id: str,
+    pwd_type: str = "0",
+) -> tuple[dict[str, str], Any]:
+    """List offline temporary passwords."""
+
+    async def _run(client: TuyaPasswordClient) -> Any:
+        return await client._call(
+            "tuya.m.device.lock.offlinepwd.list",
+            {"devId": device_id, "pwdType": str(pwd_type)},
+            version="1.0",
+        )
+
+    return await _with_client(
+        username=username,
+        password=password,
+        country_code=country_code,
+        app=app,
+        session_data=session_data,
+        runner=_run,
+    )

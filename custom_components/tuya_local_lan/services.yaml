@@ -1,3 +1,173 @@
 rescan:
   name: Rescan LAN
   description: Escaneia de novo a rede local e atualiza devices/DPs automaticamente.
+
+get_unlock_history:
+  name: Histórico de desbloqueio
+  description: Busca registros de abertura da fechadura via sessão do app (nuvem).
+  fields:
+    device_id:
+      name: Device ID
+      description: ID Tuya da fechadura
+      required: true
+      example: bfxxxxxxxx
+      selector:
+        text:
+    limit:
+      name: Limite
+      description: Quantidade máxima de registros
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    offset:
+      name: Offset
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 10000
+          mode: box
+
+get_alarm_history:
+  name: Histórico de alarmes
+  description: Busca alarmes da fechadura via sessão do app.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+    limit:
+      name: Limite
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    offset:
+      name: Offset
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 10000
+          mode: box
+
+list_temp_passwords:
+  name: Listar senhas temporárias
+  description: Lista senhas temporárias online da fechadura.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+
+create_temp_password:
+  name: Criar senha temporária
+  description: Cria senha temporária online (painel). Password em texto claro 6–7 dígitos.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Nome
+      required: true
+      selector:
+        text:
+    password:
+      name: Senha
+      required: true
+      selector:
+        text:
+    effective_time:
+      name: Início (unix s)
+      required: true
+      selector:
+        number:
+          mode: box
+    invalid_time:
+      name: Fim (unix s)
+      required: true
+      selector:
+        number:
+          mode: box
+    avail_time:
+      name: Usos (0=ilimitado, 1=única)
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 1
+          mode: box
+    phone:
+      name: Telefone (opcional)
+      selector:
+        text:
+
+delete_temp_password:
+  name: Apagar senha temporária
+  description: Remove senha temporária online pelo id.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+    password_id:
+      name: Password ID
+      required: true
+      selector:
+        text:
+
+get_offline_password:
+  name: Gerar senha offline
+  description: Pede à nuvem uma senha temporária offline (retorna os dígitos).
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+    pwd_type:
+      name: Tipo (0=múltipla, 1=única, 9=limpar)
+      default: "1"
+      selector:
+        text:
+    gmt_start:
+      name: Início (unix s, 0 se N/A)
+      default: 0
+      selector:
+        number:
+          mode: box
+    gmt_expired:
+      name: Fim (unix s, 0 se N/A)
+      default: 0
+      selector:
+        number:
+          mode: box
+    pwd_name:
+      name: Nome (opcional)
+      selector:
+        text:
+
+list_offline_passwords:
+  name: Listar senhas offline
+  description: Lista senhas temporárias offline da fechadura.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector:
+        text:
+    pwd_type:
+      name: Tipo
+      default: "0"
+      selector:
+        text:

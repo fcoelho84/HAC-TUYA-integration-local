@@ -73,8 +73,23 @@ class TuyaLocalLock(CoordinatorEntity[TuyaLocalCoordinator], LockEntity):
             value = self.coordinator.devices[self._device_id].dps.get(self._dp_state)
         return _is_locked(value)
 
+    def _command_value(self, locked: bool) -> Any:
+        data = (self.coordinator.data or {}).get(self._device_id) or {}
+        current = data.get(self._dp_state)
+        if current is None:
+            current = self.coordinator.devices[self._device_id].dps.get(self._dp_state)
+        if isinstance(current, str):
+            return "lock" if locked else "unlock"
+        if isinstance(current, (int, float)) and not isinstance(current, bool):
+            return 1 if locked else 0
+        return locked
+
     async def async_lock(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_dp(self._device_id, self._dp_cmd, True)
+        await self.coordinator.async_set_dp(
+            self._device_id, self._dp_cmd, self._command_value(True)
+        )
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_dp(self._device_id, self._dp_cmd, False)
+        await self.coordinator.async_set_dp(
+            self._device_id, self._dp_cmd, self._command_value(False)
+        )

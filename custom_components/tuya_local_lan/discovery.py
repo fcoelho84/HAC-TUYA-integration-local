@@ -36,6 +36,98 @@ LOCK_STRINGS = {
     "opened",
 }
 
+# Tuya product category codes (cloud). Used only as signals, not device layouts.
+LOCK_CATEGORIES = {
+    "ms",
+    "jtmspro",
+    "videolock",
+    "photolock",
+    "lock",
+    "smartlock",
+    "mk",
+}
+SWITCH_CATEGORIES = {
+    "kg",
+    "cz",
+    "pc",
+    "tdq",
+    "tgq",
+    "clkg",
+    "wk",
+    "cwwsq",
+}
+
+LOCK_NAME_HINTS = (
+    "lock",
+    "fechadura",
+    "door lock",
+    "smart lock",
+    "trava",
+    "cadeado",
+)
+
+
+def _sorted_dp_ids(ids: list[str]) -> list[str]:
+    return sorted(ids, key=lambda x: int(x) if x.isdigit() else x)
+
+
+def _category_token(category: str | None) -> str:
+    return str(category or "").strip().lower()
+
+
+def _looks_like_lock(name: str | None, category: str | None) -> bool:
+    if _category_token(category) in LOCK_CATEGORIES:
+        return True
+    text = f"{name or ''} {category or ''}".lower()
+    return any(hint in text for hint in LOCK_NAME_HINTS)
+
+
+def _looks_like_switch_category(category: str | None) -> bool:
+    return _category_token(category) in SWITCH_CATEGORIES
+
+
+def _switchable_dps(dps: dict[str, Any]) -> list[str]:
+    """All DPs that look on/off controllable (bool or exact 0/1)."""
+    ids = [str(k) for k, v in dps.items() if isinstance(v, bool)]
+    if not ids:
+        ids = [
+            str(k)
+            for k, v in dps.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and int(v) in (0, 1)
+        ]
+    return _sorted_dp_ids(ids)
+
+
+def _lock_command_dp(dps: dict[str, Any]) -> str | None:
+    for key, value in dps.items():
+        if isinstance(value, str) and value.lower() in LOCK_STRINGS:
+            return str(key)
+    switchable = _switchable_dps(dps)
+    return switchable[0] if switchable else None
+
+
+def _battery_dp(dps: dict[str, Any], used: set[str]) -> str | None:
+    """Pick a numeric 0–100 DP that looks like battery percentage."""
+    candidates: list[tuple[int, str]] = []
+    for key, value in dps.items():
+        dp = str(key)
+        if dp in used:
+            continue
+        if isinstance(value, bool):
+            continue
+        if not isinstance(value, (int, float)):
+            continue
+        level = int(value)
+        if level < 0 or level > 100:
+            continue
+        # Prefer common Tuya battery DP ids, else any 0-100 leftover.
+        priority = 0 if dp in {"47", "56", "12", "11", "10", "9"} else 1
+        candidates.append((priority, dp))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], int(item[1]) if item[1].isdigit() else item[1]))
+    return candidates[0][1]
+
 
 def harvest_local_keys(hass: HomeAssistant) -> dict[str, str]:
     """Collect local_key from other HA integrations/files."""
@@ -112,52 +204,48 @@ def _extract_from_mapping(data: dict[str, Any], keys: dict[str, str]) -> None:
         keys[str(dev_id)] = str(local_key)
 
 
-def classify_device(dps: dict[str, Any]) -> dict[str, Any]:
-    """Infer lock vs switches from live DP values."""
-    bool_dps = sorted(
-        (str(k) for k, v in dps.items() if isinstance(v, bool)),
-        key=lambda x: int(x) if x.isdigit() else x,
-    )
-    lock_dps = [
-        str(k)
-        for k, v in dps.items()
-        if isinstance(v, str) and str(v).lower() in LOCK_STRINGS
-    ]
+def classify_device(
+    dps: dict[str, Any],
+    name: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """Detect lock vs switchable channels from DPs + cloud category/name."""
+    as_lock = _looks_like_lock(name, category)
+    if not as_lock:
+        for value in dps.values():
+            if isinstance(value, str) and value.lower() in LOCK_STRINGS:
+                as_lock = True
+                break
 
-    if lock_dps:
-        dp = lock_dps[0]
-        return {"kind": "lock", "lock_dp": dp, "lock_state_dp": dp, "bool_dps": []}
+    if as_lock and not _looks_like_switch_category(category):
+        dp = _lock_command_dp(dps) or "1"
+        battery_dp = _battery_dp(dps, {dp})
+        return {
+            "kind": "lock",
+            "lock_dp": dp,
+            "lock_state_dp": dp,
+            "bool_dps": [],
+            "battery_dp": battery_dp,
+            "category": category,
+        }
 
-    if not bool_dps and dps:
-        # single numeric 0/1 often used as switch/lock
-        numeric = [
-            str(k)
-            for k, v in dps.items()
-            if isinstance(v, (int, float)) and v in (0, 1)
-        ]
-        if len(numeric) == 1:
-            return {
-                "kind": "lock",
-                "lock_dp": numeric[0],
-                "lock_state_dp": numeric[0],
-                "bool_dps": [],
-            }
-        bool_dps = sorted(numeric, key=lambda x: int(x) if x.isdigit() else x)
-
-    return {"kind": "multi_switch", "bool_dps": bool_dps, "lock_dp": None, "lock_state_dp": None}
+    switch_dps = _switchable_dps(dps)
+    battery_dp = _battery_dp(dps, set(switch_dps))
+    return {
+        "kind": "multi_switch",
+        "bool_dps": switch_dps,
+        "lock_dp": None,
+        "lock_state_dp": None,
+        "battery_dp": battery_dp,
+        "category": category,
+    }
 
 
 def switch_labels(bool_dps: list[str]) -> list[tuple[str, str]]:
-    """Map DP list to (key, friendly name)."""
-    labels_3 = ["Luz 1", "Luz 2", "Tomada"]
-    labels_2 = ["Luz 1", "Luz 2"]
+    """Map each discovered DP to a generic channel label."""
     out: list[tuple[str, str]] = []
     for idx, dp in enumerate(bool_dps):
-        if len(bool_dps) == 3 and idx < 3:
-            name = labels_3[idx]
-        elif len(bool_dps) == 2 and idx < 2:
-            name = labels_2[idx]
-        elif len(bool_dps) == 1:
+        if len(bool_dps) == 1:
             name = "Interruptor"
         else:
             name = f"Canal {idx + 1}"
@@ -168,6 +256,8 @@ def switch_labels(bool_dps: list[str]) -> list[tuple[str, str]]:
 async def probe_device(
     discovered: dict[str, Any],
     local_key: str,
+    name: str | None = None,
+    category: str | None = None,
 ) -> dict[str, Any] | None:
     """Try LAN status across protocol versions; return enriched dict or None."""
     host = discovered.get("ip") or ""
@@ -177,6 +267,8 @@ async def probe_device(
     preferred = str(discovered.get("version") or "3.3")
     versions = [preferred, *[v for v in PROBE_VERSIONS if v != preferred]]
     last_err: Exception | None = None
+    device_name = name or discovered.get("name")
+    device_category = category or discovered.get("category")
 
     for version in versions:
         device = TuyaLanDevice(
@@ -200,8 +292,12 @@ async def probe_device(
             await device.disconnect()
             continue
         await device.disconnect()
-        info = classify_device(dps or device.dps)
-        return {
+        info = classify_device(
+            dps or device.dps,
+            name=device_name,
+            category=device_category,
+        )
+        result = {
             "device_id": discovered["device_id"],
             "host": host,
             "local_key": local_key,
@@ -210,6 +306,9 @@ async def probe_device(
             "dps": dps or device.dps,
             **info,
         }
+        if device_name:
+            result["name"] = device_name
+        return result
 
     if last_err:
         _LOGGER.warning(
@@ -248,8 +347,18 @@ async def async_scan_network(
         seen.add(dev_id)
         local_key = keyring.get(dev_id, "")
         cloud = cloud_by_id.get(dev_id) or {}
-        probed = await probe_device(item, local_key)
+        probed = await probe_device(
+            item,
+            local_key,
+            name=cloud.get("name"),
+            category=cloud.get("category"),
+        )
         if probed is None:
+            fallback = classify_device(
+                {},
+                name=cloud.get("name"),
+                category=cloud.get("category"),
+            )
             results.append(
                 {
                     "device_id": dev_id,
@@ -259,10 +368,7 @@ async def async_scan_network(
                     "protocol_version": str(item.get("version") or "3.3"),
                     "product_key": item.get("product_key"),
                     "dps": {},
-                    "kind": "multi_switch",
-                    "bool_dps": ["1", "2", "3"],
-                    "lock_dp": None,
-                    "lock_state_dp": None,
+                    **fallback,
                     "needs_key": not bool(local_key),
                 }
             )
@@ -270,6 +376,8 @@ async def async_scan_network(
         probed["needs_key"] = not bool(local_key)
         if cloud.get("name"):
             probed["name"] = cloud["name"]
+        if cloud.get("category"):
+            probed["category"] = cloud["category"]
         results.append(probed)
 
     for device_id, cloud in cloud_by_id.items():
@@ -282,6 +390,11 @@ async def async_scan_network(
             host = cloud_ip
         local_key = str(cloud.get("local_key") or keyring.get(device_id) or "")
         if not host:
+            fallback = classify_device(
+                {},
+                name=cloud.get("name"),
+                category=cloud.get("category"),
+            )
             results.append(
                 {
                     "device_id": device_id,
@@ -291,10 +404,7 @@ async def async_scan_network(
                     "protocol_version": "3.3",
                     "product_key": None,
                     "dps": {},
-                    "kind": "multi_switch",
-                    "bool_dps": ["1", "2", "3"],
-                    "lock_dp": None,
-                    "lock_state_dp": None,
+                    **fallback,
                     "needs_key": not bool(local_key),
                 }
             )
@@ -304,9 +414,21 @@ async def async_scan_network(
             "ip": host,
             "version": "3.3",
             "product_key": None,
+            "category": cloud.get("category"),
+            "name": cloud.get("name"),
         }
-        probed = await probe_device(discovered, local_key)
+        probed = await probe_device(
+            discovered,
+            local_key,
+            name=cloud.get("name"),
+            category=cloud.get("category"),
+        )
         if probed is None:
+            fallback = classify_device(
+                {},
+                name=cloud.get("name"),
+                category=cloud.get("category"),
+            )
             results.append(
                 {
                     "device_id": device_id,
@@ -316,10 +438,7 @@ async def async_scan_network(
                     "protocol_version": "3.3",
                     "product_key": None,
                     "dps": {},
-                    "kind": "multi_switch",
-                    "bool_dps": ["1", "2", "3"],
-                    "lock_dp": None,
-                    "lock_state_dp": None,
+                    **fallback,
                     "needs_key": not bool(local_key),
                 }
             )
@@ -327,6 +446,8 @@ async def async_scan_network(
         probed["needs_key"] = not bool(local_key)
         if cloud.get("name"):
             probed["name"] = cloud["name"]
+        if cloud.get("category"):
+            probed["category"] = cloud["category"]
         results.append(probed)
 
     return results
