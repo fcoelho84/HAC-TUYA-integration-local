@@ -26,33 +26,6 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    if CONF_USERNAME in entry.data and CONF_PASSWORD in entry.data:
-        try:
-            session, cloud_devices = await async_list_with_session(
-                username=entry.data[CONF_USERNAME],
-                password=entry.data[CONF_PASSWORD],
-                country_code=entry.data.get(CONF_COUNTRY_CODE, DEFAULT_COUNTRY_CODE),
-                app=entry.data.get(CONF_APP, DEFAULT_APP),
-                session_data=entry.data.get(CONF_SESSION),
-            )
-            devices = await async_scan_network(
-                hass,
-                timeout=DISCOVERY_TIMEOUT,
-                cloud_devices=cloud_devices,
-            )
-            if devices:
-                hass.config_entries.async_update_entry(
-                    entry,
-                    data={
-                        **entry.data,
-                        CONF_SESSION: session,
-                        CONF_DEVICES: devices,
-                    },
-                    title=f"Tuya Local LAN ({len(devices)} device(s))",
-                )
-        except CloudAuthError:
-            pass
-
     coordinator = TuyaLocalCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -64,13 +37,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cloud_devices = None
         session = entry.data.get(CONF_SESSION)
         if CONF_USERNAME in entry.data and CONF_PASSWORD in entry.data:
-            session, cloud_devices = await async_list_with_session(
-                username=entry.data[CONF_USERNAME],
-                password=entry.data[CONF_PASSWORD],
-                country_code=entry.data.get(CONF_COUNTRY_CODE, DEFAULT_COUNTRY_CODE),
-                app=entry.data.get(CONF_APP, DEFAULT_APP),
-                session_data=entry.data.get(CONF_SESSION),
-            )
+            try:
+                session, cloud_devices = await async_list_with_session(
+                    username=entry.data[CONF_USERNAME],
+                    password=entry.data[CONF_PASSWORD],
+                    country_code=entry.data.get(
+                        CONF_COUNTRY_CODE, DEFAULT_COUNTRY_CODE
+                    ),
+                    app=entry.data.get(CONF_APP, DEFAULT_APP),
+                    session_data=entry.data.get(CONF_SESSION),
+                )
+            except CloudAuthError:
+                cloud_devices = None
         devices = await async_scan_network(
             hass,
             timeout=DISCOVERY_TIMEOUT,
@@ -79,7 +57,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         data = {**entry.data, CONF_DEVICES: devices}
         if session is not None:
             data[CONF_SESSION] = session
-        hass.config_entries.async_update_entry(entry, data=data)
+        hass.config_entries.async_update_entry(
+            entry,
+            data=data,
+            title=f"Tuya Local LAN ({len(devices)} device(s))",
+        )
         await hass.config_entries.async_reload(entry.entry_id)
 
     hass.services.async_register(DOMAIN, "rescan", _async_rescan)

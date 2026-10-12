@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 from pathlib import Path
@@ -12,6 +13,17 @@ from homeassistant.core import HomeAssistant
 from .protocol import TuyaLanDevice, discover
 
 _LOGGER = logging.getLogger(__name__)
+
+PROBE_VERSIONS = ("3.3", "3.4", "3.5")
+
+
+def _is_private_ip(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        return ipaddress.ip_address(value).is_private
+    except ValueError:
+        return False
 
 LOCK_STRINGS = {
     "lock",
@@ -157,41 +169,56 @@ async def probe_device(
     discovered: dict[str, Any],
     local_key: str,
 ) -> dict[str, Any] | None:
-    """Try LAN status; return enriched device dict or None."""
-    version = str(discovered.get("version") or "3.3")
-    device = TuyaLanDevice(
-        device_id=discovered["device_id"],
-        local_key=local_key or "0" * 16,
-        host=discovered["ip"],
-        version=version,
-    )
-    try:
-        dps = await device.status()
-    except Exception as err:
-        _LOGGER.debug(
-            "probe failed %s@%s key=%s: %s",
-            discovered["device_id"],
-            discovered["ip"],
-            "yes" if local_key else "no",
-            err,
-        )
-        if local_key:
-            return None
-        # retry nonsense key already failed; give up
+    """Try LAN status across protocol versions; return enriched dict or None."""
+    host = discovered.get("ip") or ""
+    if not host:
         return None
-    finally:
-        await device.disconnect()
 
-    info = classify_device(dps or device.dps)
-    return {
-        "device_id": discovered["device_id"],
-        "host": discovered["ip"],
-        "local_key": local_key,
-        "protocol_version": version,
-        "product_key": discovered.get("product_key"),
-        "dps": dps or device.dps,
-        **info,
-    }
+    preferred = str(discovered.get("version") or "3.3")
+    versions = [preferred, *[v for v in PROBE_VERSIONS if v != preferred]]
+    last_err: Exception | None = None
+
+    for version in versions:
+        device = TuyaLanDevice(
+            device_id=discovered["device_id"],
+            local_key=local_key or "0" * 16,
+            host=host,
+            version=version,
+        )
+        try:
+            dps = await device.status()
+        except Exception as err:
+            last_err = err
+            _LOGGER.debug(
+                "probe failed %s@%s v=%s key=%s: %s",
+                discovered["device_id"],
+                host,
+                version,
+                "yes" if local_key else "no",
+                err,
+            )
+            await device.disconnect()
+            continue
+        await device.disconnect()
+        info = classify_device(dps or device.dps)
+        return {
+            "device_id": discovered["device_id"],
+            "host": host,
+            "local_key": local_key,
+            "protocol_version": version,
+            "product_key": discovered.get("product_key"),
+            "dps": dps or device.dps,
+            **info,
+        }
+
+    if last_err:
+        _LOGGER.warning(
+            "probe exhausted %s@%s: %s",
+            discovered["device_id"],
+            host,
+            last_err,
+        )
+    return None
 
 
 async def async_scan_network(
@@ -222,14 +249,12 @@ async def async_scan_network(
         local_key = keyring.get(dev_id, "")
         cloud = cloud_by_id.get(dev_id) or {}
         probed = await probe_device(item, local_key)
-        if probed is None and local_key:
-            continue
         if probed is None:
             results.append(
                 {
                     "device_id": dev_id,
                     "host": item["ip"],
-                    "local_key": "",
+                    "local_key": local_key,
                     "name": cloud.get("name"),
                     "protocol_version": str(item.get("version") or "3.3"),
                     "product_key": item.get("product_key"),
@@ -238,7 +263,7 @@ async def async_scan_network(
                     "bool_dps": ["1", "2", "3"],
                     "lock_dp": None,
                     "lock_state_dp": None,
-                    "needs_key": True,
+                    "needs_key": not bool(local_key),
                 }
             )
             continue
@@ -250,13 +275,18 @@ async def async_scan_network(
     for device_id, cloud in cloud_by_id.items():
         if device_id in seen:
             continue
-        host = cloud.get("host") or (lan_by_id.get(device_id) or {}).get("ip")
+        lan_ip = (lan_by_id.get(device_id) or {}).get("ip")
+        cloud_ip = cloud.get("host")
+        host = lan_ip if _is_private_ip(lan_ip) else None
+        if host is None and _is_private_ip(cloud_ip):
+            host = cloud_ip
+        local_key = str(cloud.get("local_key") or keyring.get(device_id) or "")
         if not host:
             results.append(
                 {
                     "device_id": device_id,
                     "host": "",
-                    "local_key": str(cloud.get("local_key") or ""),
+                    "local_key": local_key,
                     "name": cloud.get("name"),
                     "protocol_version": "3.3",
                     "product_key": None,
@@ -265,7 +295,7 @@ async def async_scan_network(
                     "bool_dps": ["1", "2", "3"],
                     "lock_dp": None,
                     "lock_state_dp": None,
-                    "needs_key": not bool(cloud.get("local_key")),
+                    "needs_key": not bool(local_key),
                 }
             )
             continue
@@ -275,7 +305,6 @@ async def async_scan_network(
             "version": "3.3",
             "product_key": None,
         }
-        local_key = str(cloud.get("local_key") or keyring.get(device_id) or "")
         probed = await probe_device(discovered, local_key)
         if probed is None:
             results.append(

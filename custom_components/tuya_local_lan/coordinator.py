@@ -6,7 +6,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import CONF_DEVICES, SCAN_INTERVAL_SECONDS, TCP_PORT
 from .protocol import TuyaLanDevice
@@ -67,9 +67,9 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 errors += 1
                 runtime.available = False
                 result[device_id] = runtime.dps
-                _LOGGER.debug("update failed %s: %s", device_id, err)
-        if errors and errors == len(self.devices):
-            raise UpdateFailed("all devices unreachable")
+                _LOGGER.warning("update failed %s@%s: %s", device_id, runtime.info.get("host"), err)
+        if errors:
+            _LOGGER.debug("%s/%s devices unreachable", errors, len(self.devices))
         return result
 
     async def async_set_dp(self, device_id: str, dp: str, value: Any) -> None:
