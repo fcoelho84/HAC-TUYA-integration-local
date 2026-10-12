@@ -51,7 +51,7 @@ class TuyaLocalSwitch(CoordinatorEntity[TuyaLocalCoordinator], SwitchEntity):
         runtime = coordinator.devices[device_id]
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
-            name=f"Tuya {device_id[-6:]}",
+            name=runtime.info.get("name") or f"Tuya {device_id[-6:]}",
             manufacturer="Tuya",
             model=runtime.info.get("product_key") or "Local LAN",
         )

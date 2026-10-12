@@ -13,6 +13,8 @@ from .protocol import TuyaLanDevice
 
 _LOGGER = logging.getLogger(__name__)
 
+PROTOCOL_VERSIONS = ("3.3", "3.4", "3.5", "3.2", "3.1")
+
 
 class DeviceRuntime:
     def __init__(self, info: dict[str, Any]) -> None:
@@ -20,7 +22,7 @@ class DeviceRuntime:
         self.device = TuyaLanDevice(
             device_id=info["device_id"],
             local_key=info.get("local_key") or "0" * 16,
-            host=info["host"],
+            host=info.get("host") or "",
             port=TCP_PORT,
             version=info.get("protocol_version") or "3.3",
         )
@@ -46,6 +48,30 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             for item in entry.data.get(CONF_DEVICES, [])
         }
 
+    async def _status_with_version_fallback(
+        self, runtime: DeviceRuntime
+    ) -> dict[str, Any]:
+        current = str(runtime.device.version)
+        versions = [current, *[v for v in PROTOCOL_VERSIONS if v != current]]
+        last_err: Exception | None = None
+        for version in versions:
+            runtime.device.version = version
+            try:
+                dps = await runtime.device.status()
+                runtime.info["protocol_version"] = version
+                return dps
+            except Exception as err:
+                last_err = err
+                _LOGGER.debug(
+                    "status fail %s@%s v=%s: %s",
+                    runtime.device_id,
+                    runtime.info.get("host"),
+                    version,
+                    err,
+                )
+        runtime.device.version = current
+        raise last_err or ConnectionError("status failed")
+
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         errors = 0
@@ -59,7 +85,7 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 result[device_id] = runtime.dps
                 continue
             try:
-                dps = await runtime.device.status()
+                dps = await self._status_with_version_fallback(runtime)
                 runtime.dps = dps or runtime.device.dps
                 runtime.available = True
                 result[device_id] = runtime.dps
@@ -67,7 +93,12 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 errors += 1
                 runtime.available = False
                 result[device_id] = runtime.dps
-                _LOGGER.warning("update failed %s@%s: %s", device_id, runtime.info.get("host"), err)
+                _LOGGER.warning(
+                    "update failed %s@%s: %s",
+                    device_id,
+                    runtime.info.get("host"),
+                    err,
+                )
         if errors:
             _LOGGER.debug("%s/%s devices unreachable", errors, len(self.devices))
         return result

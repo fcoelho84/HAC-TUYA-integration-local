@@ -14,7 +14,7 @@ from .protocol import TuyaLanDevice, discover
 
 _LOGGER = logging.getLogger(__name__)
 
-PROBE_VERSIONS = ("3.3", "3.4", "3.5")
+PROBE_VERSIONS = ("3.3", "3.4", "3.5", "3.2", "3.1")
 
 
 def _is_private_ip(value: str | None) -> bool:

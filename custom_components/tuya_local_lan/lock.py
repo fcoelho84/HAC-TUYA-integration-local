@@ -55,7 +55,7 @@ class TuyaLocalLock(CoordinatorEntity[TuyaLocalCoordinator], LockEntity):
         self._attr_unique_id = f"{device_id}_lock"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
-            name=f"Tuya {device_id[-6:]}",
+            name=info.get("name") or f"Tuya {device_id[-6:]}",
             manufacturer="Tuya",
             model=info.get("product_key") or "Local LAN lock",
         )
