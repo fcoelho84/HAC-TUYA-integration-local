@@ -1,0 +1,28 @@
+DOMAIN = "tuya_local_lan"
+PLATFORMS = ["switch", "lock"]
+
+CONF_DEVICE_ID = "device_id"
+CONF_LOCAL_KEY = "local_key"
+CONF_HOST = "host"
+CONF_PROTOCOL_VERSION = "protocol_version"
+CONF_DEVICE_TYPE = "device_type"
+CONF_DP_LOCK = "dp_lock"
+CONF_DP_LOCK_STATE = "dp_lock_state"
+CONF_DP_LIGHT_1 = "dp_light_1"
+CONF_DP_LIGHT_2 = "dp_light_2"
+CONF_DP_OUTLET = "dp_outlet"
+
+DEVICE_TYPE_LOCK = "lock"
+DEVICE_TYPE_MULTI_SWITCH = "multi_switch"
+
+DEFAULT_PROTOCOL = "3.3"
+DEFAULT_DP_LOCK = "1"
+DEFAULT_DP_LOCK_STATE = "1"
+DEFAULT_DP_LIGHT_1 = "1"
+DEFAULT_DP_LIGHT_2 = "2"
+DEFAULT_DP_OUTLET = "3"
+
+TCP_PORT = 6668
+UDP_PORTS = (6666, 6667)
+SCAN_INTERVAL_SECONDS = 15
+CONNECT_TIMEOUT = 8

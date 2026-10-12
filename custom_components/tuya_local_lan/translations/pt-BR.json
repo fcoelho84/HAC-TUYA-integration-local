@@ -1,0 +1,47 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tuya Local LAN",
+        "description": "Controle local (LAN). Precisa de device_id, local_key e IP.",
+        "data": {
+          "name": "Nome",
+          "device_id": "Device ID (gwId)",
+          "local_key": "Local key",
+          "host": "IP / host",
+          "protocol_version": "Versão do protocolo",
+          "device_type": "Tipo de dispositivo"
+        }
+      },
+      "multi_dps": {
+        "title": "DPs do interruptor",
+        "description": "2 luzes + 1 tomada (IDs de Data Point).",
+        "data": {
+          "dp_light_1": "DP Luz 1",
+          "dp_light_2": "DP Luz 2",
+          "dp_outlet": "DP Tomada"
+        }
+      },
+      "lock_dps": {
+        "title": "DPs da fechadura",
+        "data": {
+          "dp_lock": "DP comando lock/unlock",
+          "dp_lock_state": "DP estado"
+        }
+      },
+      "discover": {
+        "title": "Dispositivos descobertos (UDP)",
+        "data": {
+          "device_id": "Dispositivo"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Falha ao conectar na LAN. Confira IP, key e versão."
+    },
+    "abort": {
+      "already_configured": "Device já configurado",
+      "no_devices": "Nenhum device UDP encontrado"
+    }
+  }
+}

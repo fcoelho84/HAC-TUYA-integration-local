@@ -1,0 +1,10 @@
+{
+  "domain": "tuya_local_lan",
+  "name": "Tuya Local LAN",
+  "codeowners": ["@local"],
+  "config_flow": true,
+  "documentation": "https://github.com/local/HAC-TUYA-integration-local",
+  "iot_class": "local_polling",
+  "requirements": ["cryptography>=41.0.0"],
+  "version": "1.0.0"
+}
