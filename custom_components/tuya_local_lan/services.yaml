@@ -1,0 +1,3 @@
+rescan:
+  name: Rescan LAN
+  description: Escaneia de novo a rede local e atualiza devices/DPs automaticamente.

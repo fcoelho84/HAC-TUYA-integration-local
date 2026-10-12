@@ -9,16 +9,9 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    CONF_DEVICE_ID,
-    CONF_DEVICE_TYPE,
-    CONF_DP_LIGHT_1,
-    CONF_DP_LIGHT_2,
-    CONF_DP_OUTLET,
-    DEVICE_TYPE_MULTI_SWITCH,
-    DOMAIN,
-)
+from .const import DEVICE_KIND_MULTI_SWITCH, DOMAIN
 from .coordinator import TuyaLocalCoordinator
+from .discovery import switch_labels
 
 
 async def async_setup_entry(
@@ -26,20 +19,17 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    if entry.data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_MULTI_SWITCH:
-        return
     coordinator: TuyaLocalCoordinator = hass.data[DOMAIN][entry.entry_id]
-    channels = [
-        ("luz_1", entry.data[CONF_DP_LIGHT_1], "Luz 1"),
-        ("luz_2", entry.data[CONF_DP_LIGHT_2], "Luz 2"),
-        ("tomada", entry.data[CONF_DP_OUTLET], "Tomada"),
-    ]
-    async_add_entities(
-        [
-            TuyaLocalSwitch(coordinator, entry, key, dp, name)
-            for key, dp, name in channels
-        ]
-    )
+    entities: list[TuyaLocalSwitch] = []
+    for runtime in coordinator.devices.values():
+        if runtime.info.get("kind") != DEVICE_KIND_MULTI_SWITCH:
+            continue
+        bool_dps = list(runtime.info.get("bool_dps") or [])
+        for (key, name), dp in zip(switch_labels(bool_dps), bool_dps, strict=False):
+            entities.append(
+                TuyaLocalSwitch(coordinator, runtime.device_id, key, dp, name)
+            )
+    async_add_entities(entities)
 
 
 class TuyaLocalSwitch(CoordinatorEntity[TuyaLocalCoordinator], SwitchEntity):
@@ -48,33 +38,41 @@ class TuyaLocalSwitch(CoordinatorEntity[TuyaLocalCoordinator], SwitchEntity):
     def __init__(
         self,
         coordinator: TuyaLocalCoordinator,
-        entry: ConfigEntry,
+        device_id: str,
         key: str,
         dp: str,
         name: str,
     ) -> None:
         super().__init__(coordinator)
+        self._device_id = device_id
         self._dp = str(dp)
         self._attr_name = name
-        self._attr_unique_id = f"{entry.data[CONF_DEVICE_ID]}_{key}"
+        self._attr_unique_id = f"{device_id}_{key}"
+        runtime = coordinator.devices[device_id]
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.data[CONF_DEVICE_ID])},
-            name=entry.title,
+            identifiers={(DOMAIN, device_id)},
+            name=f"Tuya {device_id[-6:]}",
             manufacturer="Tuya",
-            model="Local LAN multi-switch",
+            model=runtime.info.get("product_key") or "Local LAN",
         )
 
     @property
+    def available(self) -> bool:
+        runtime = self.coordinator.devices.get(self._device_id)
+        return bool(runtime and runtime.available)
+
+    @property
     def is_on(self) -> bool | None:
-        value = self.coordinator.data.get(self._dp)
+        data = (self.coordinator.data or {}).get(self._device_id) or {}
+        value = data.get(self._dp)
         if value is None:
-            value = self.coordinator.device.dps.get(self._dp)
+            value = self.coordinator.devices[self._device_id].dps.get(self._dp)
         if value is None:
             return None
         return bool(value)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_dp(self._dp, True)
+        await self.coordinator.async_set_dp(self._device_id, self._dp, True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_dp(self._dp, False)
+        await self.coordinator.async_set_dp(self._device_id, self._dp, False)

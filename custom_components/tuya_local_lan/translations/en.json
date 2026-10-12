@@ -3,45 +3,16 @@
     "step": {
       "user": {
         "title": "Tuya Local LAN",
-        "description": "Local LAN control. Requires device_id, local_key and IP.",
-        "data": {
-          "name": "Name",
-          "device_id": "Device ID (gwId)",
-          "local_key": "Local key",
-          "host": "IP / host",
-          "protocol_version": "Protocol version",
-          "device_type": "Device type"
-        }
+        "description": "Scans the LAN (UDP). No manual device ID, IP or token. Reuses local keys already present in HA when available."
       },
-      "multi_dps": {
-        "title": "Switch data points",
-        "description": "2 lights + 1 outlet DP IDs.",
-        "data": {
-          "dp_light_1": "Light 1 DP",
-          "dp_light_2": "Light 2 DP",
-          "dp_outlet": "Outlet DP"
-        }
-      },
-      "lock_dps": {
-        "title": "Lock data points",
-        "data": {
-          "dp_lock": "Lock/unlock command DP",
-          "dp_lock_state": "State DP"
-        }
-      },
-      "discover": {
-        "title": "Discovered devices (UDP)",
-        "data": {
-          "device_id": "Device"
-        }
+      "reconfigure": {
+        "title": "Rescan Tuya Local LAN",
+        "description": "Fresh UDP scan + automatic DP detection."
       }
     },
-    "error": {
-      "cannot_connect": "Could not connect on LAN. Check IP, key and version."
-    },
     "abort": {
-      "already_configured": "Device already configured",
-      "no_devices": "No UDP devices found"
+      "already_configured": "Integration already configured. Use the rescan service.",
+      "no_devices": "No Tuya devices found on the LAN. Check they share the HA network."
     }
   }
 }
