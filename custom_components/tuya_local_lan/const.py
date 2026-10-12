@@ -2,6 +2,14 @@ DOMAIN = "tuya_local_lan"
 PLATFORMS = ["switch", "lock"]
 
 CONF_DEVICES = "devices"
+CONF_USERNAME = "username"
+CONF_PASSWORD = "password"
+CONF_COUNTRY_CODE = "country_code"
+CONF_APP = "app"
+CONF_SESSION = "session"
+
+DEFAULT_COUNTRY_CODE = "55"
+DEFAULT_APP = "tuya_smart"
 
 DEVICE_KIND_LOCK = "lock"
 DEVICE_KIND_MULTI_SWITCH = "multi_switch"

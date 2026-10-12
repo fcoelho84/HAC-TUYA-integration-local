@@ -3,16 +3,26 @@
     "step": {
       "user": {
         "title": "Tuya Local LAN",
-        "description": "Scans the LAN (UDP). No manual device ID, IP or token. Reuses local keys already present in HA when available."
+        "description": "Sign in with your Tuya Smart or Smart Life account. No Access ID/Secret. Session stays saved.",
+        "data": {
+          "username": "Email or phone",
+          "password": "Password",
+          "country_code": "Country code",
+          "app": "App (tuya_smart or smart_life)"
+        }
       },
       "reconfigure": {
         "title": "Rescan Tuya Local LAN",
-        "description": "Fresh UDP scan + automatic DP detection."
+        "description": "Reuse saved session, refresh devices and UDP scan."
       }
+    },
+    "error": {
+      "invalid_auth": "Login failed. Check email/password, country and app."
     },
     "abort": {
       "already_configured": "Integration already configured. Use the rescan service.",
-      "no_devices": "No Tuya devices found on the LAN. Check they share the HA network."
+      "no_devices": "No devices on account/LAN.",
+      "invalid_auth": "Invalid session. Remove and set up again."
     }
   }
 }

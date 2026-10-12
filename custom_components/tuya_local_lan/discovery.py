@@ -1,4 +1,4 @@
-"""UDP discovery + local key harvest (no cloud API)."""
+"""UDP discovery + cloud local keys + optional HA key harvest."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ LOCK_STRINGS = {
 
 
 def harvest_local_keys(hass: HomeAssistant) -> dict[str, str]:
-    """Collect local_key from other local HA sources (never cloud login)."""
+    """Collect local_key from other HA integrations/files."""
     keys: dict[str, str] = {}
 
     for domain in ("tuya", "tuya_local", "localtuya", "tuyalocal"):
@@ -194,25 +194,43 @@ async def probe_device(
     }
 
 
-async def async_scan_network(hass: HomeAssistant, timeout: float = 5.0) -> list[dict[str, Any]]:
-    """Discover LAN devices and auto-enrich with local keys + DP map."""
+async def async_scan_network(
+    hass: HomeAssistant,
+    timeout: float = 5.0,
+    cloud_devices: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Discover LAN devices; merge cloud local_keys; classify DPs."""
     found = await discover(timeout=timeout)
     keyring = harvest_local_keys(hass)
+    cloud_by_id: dict[str, dict[str, Any]] = {}
+    for item in cloud_devices or []:
+        device_id = str(item.get("device_id") or "")
+        if not device_id:
+            continue
+        cloud_by_id[device_id] = item
+        local_key = item.get("local_key")
+        if local_key:
+            keyring[device_id] = str(local_key)
+
+    lan_by_id = {item["device_id"]: item for item in found}
     results: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
     for item in found:
         dev_id = item["device_id"]
+        seen.add(dev_id)
         local_key = keyring.get(dev_id, "")
+        cloud = cloud_by_id.get(dev_id) or {}
         probed = await probe_device(item, local_key)
         if probed is None and local_key:
             continue
         if probed is None:
-            # keep discovery metadata anyway; entity will be unavailable until key appears
             results.append(
                 {
                     "device_id": dev_id,
                     "host": item["ip"],
                     "local_key": "",
+                    "name": cloud.get("name"),
                     "protocol_version": str(item.get("version") or "3.3"),
                     "product_key": item.get("product_key"),
                     "dps": {},
@@ -225,6 +243,61 @@ async def async_scan_network(hass: HomeAssistant, timeout: float = 5.0) -> list[
             )
             continue
         probed["needs_key"] = not bool(local_key)
+        if cloud.get("name"):
+            probed["name"] = cloud["name"]
+        results.append(probed)
+
+    for device_id, cloud in cloud_by_id.items():
+        if device_id in seen:
+            continue
+        host = cloud.get("host") or (lan_by_id.get(device_id) or {}).get("ip")
+        if not host:
+            results.append(
+                {
+                    "device_id": device_id,
+                    "host": "",
+                    "local_key": str(cloud.get("local_key") or ""),
+                    "name": cloud.get("name"),
+                    "protocol_version": "3.3",
+                    "product_key": None,
+                    "dps": {},
+                    "kind": "multi_switch",
+                    "bool_dps": ["1", "2", "3"],
+                    "lock_dp": None,
+                    "lock_state_dp": None,
+                    "needs_key": not bool(cloud.get("local_key")),
+                }
+            )
+            continue
+        discovered = {
+            "device_id": device_id,
+            "ip": host,
+            "version": "3.3",
+            "product_key": None,
+        }
+        local_key = str(cloud.get("local_key") or keyring.get(device_id) or "")
+        probed = await probe_device(discovered, local_key)
+        if probed is None:
+            results.append(
+                {
+                    "device_id": device_id,
+                    "host": host,
+                    "local_key": local_key,
+                    "name": cloud.get("name"),
+                    "protocol_version": "3.3",
+                    "product_key": None,
+                    "dps": {},
+                    "kind": "multi_switch",
+                    "bool_dps": ["1", "2", "3"],
+                    "lock_dp": None,
+                    "lock_state_dp": None,
+                    "needs_key": not bool(local_key),
+                }
+            )
+            continue
+        probed["needs_key"] = not bool(local_key)
+        if cloud.get("name"):
+            probed["name"] = cloud["name"]
         results.append(probed)
 
     return results

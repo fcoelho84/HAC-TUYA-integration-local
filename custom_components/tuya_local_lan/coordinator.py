@@ -25,7 +25,7 @@ class DeviceRuntime:
             version=info.get("protocol_version") or "3.3",
         )
         self.dps: dict[str, Any] = dict(info.get("dps") or {})
-        self.available = not info.get("needs_key")
+        self.available = bool(info.get("host")) and not info.get("needs_key")
 
     @property
     def device_id(self) -> str:
@@ -50,6 +50,10 @@ class TuyaLocalCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         result: dict[str, dict[str, Any]] = {}
         errors = 0
         for device_id, runtime in self.devices.items():
+            if not runtime.info.get("host"):
+                runtime.available = False
+                result[device_id] = runtime.dps
+                continue
             if runtime.info.get("needs_key") and not runtime.info.get("local_key"):
                 runtime.available = False
                 result[device_id] = runtime.dps
