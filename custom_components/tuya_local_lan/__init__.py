@@ -131,10 +131,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_unlock_history(call: ServiceCall) -> dict[str, Any]:
         device_id = str(call.data["device_id"])
         target, coordinator = _entry_and_coordinator(hass, device_id)
+        info = coordinator.devices[device_id].info
         try:
             session, result = await async_lock_unlock_history(
                 **_auth_kwargs(target, coordinator),
                 device_id=device_id,
+                dp_ids=info.get("unlock_dp_ids"),
+                schema_codes=info.get("schema_codes"),
+                gid=info.get("gid"),
                 limit=int(call.data.get("limit", 50)),
                 offset=int(call.data.get("offset", 0)),
             )
@@ -146,10 +150,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_alarm_history(call: ServiceCall) -> dict[str, Any]:
         device_id = str(call.data["device_id"])
         target, coordinator = _entry_and_coordinator(hass, device_id)
+        info = coordinator.devices[device_id].info
         try:
             session, result = await async_lock_alarm_history(
                 **_auth_kwargs(target, coordinator),
                 device_id=device_id,
+                schema_codes=info.get("schema_codes"),
+                gid=info.get("gid"),
                 limit=int(call.data.get("limit", 50)),
                 offset=int(call.data.get("offset", 0)),
             )

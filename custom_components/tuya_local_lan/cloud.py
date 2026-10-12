@@ -37,6 +37,8 @@ ALARM_CODE_HINTS = (
     "hijack",
     "unlock_offline_clear",
 )
+# Standard Wi-Fi/Zigbee lock unlock DP ids when schema is missing.
+DEFAULT_UNLOCK_DP_IDS = list(range(1, 21)) + [25, 26, 27, 28, 29, 30, 31, 32]
 
 T = TypeVar("T")
 
@@ -232,6 +234,7 @@ async def _list_devices(client: TuyaPasswordClient) -> list[dict[str, Any]]:
                     "host": str(obj.get("ip") or obj.get("lanIp") or "") or None,
                     "name": obj.get("name"),
                     "uuid": obj.get("uuid"),
+                    "gid": str(gid),
                     "is_online": obj.get("isOnline", obj.get("cloudOnline")),
                     "category": (
                         obj.get("category")
@@ -333,9 +336,20 @@ async def _with_client(
 def _schema_entries(device: Any) -> list[dict[str, Any]]:
     if not isinstance(device, dict):
         return []
-    schema = device.get("schema") or device.get("dpName") or []
+    schema = (
+        device.get("schema")
+        or device.get("dpSchema")
+        or device.get("schemaInfo")
+        or device.get("dpName")
+        or (device.get("productBean") or {}).get("schemaInfo")
+        or (device.get("product") or {}).get("schema")
+        or []
+    )
     if isinstance(schema, str):
-        return []
+        try:
+            schema = json.loads(schema)
+        except json.JSONDecodeError:
+            return []
     if isinstance(schema, dict):
         out: list[dict[str, Any]] = []
         for key, value in schema.items():
@@ -371,16 +385,52 @@ def _dp_ids_for_codes(
     return sorted(set(ids))
 
 
+def _dp_ids_from_schema_codes(
+    schema_codes: dict[str, str] | None,
+    hints: tuple[str, ...],
+) -> list[int]:
+    if not schema_codes:
+        return []
+    ids: list[int] = []
+    for dp, code in schema_codes.items():
+        text = str(code or "").lower()
+        if not any(text == hint or text.startswith(hint) for hint in hints):
+            continue
+        try:
+            ids.append(int(dp))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(ids))
+
+
 def _normalize_history(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, list):
+        return {
+            "datas": [item for item in payload if isinstance(item, dict)],
+            "totalCount": len(payload),
+            "hasNext": False,
+            "raw": payload,
+        }
     if not isinstance(payload, dict):
         return {"datas": [], "totalCount": 0, "hasNext": False, "raw": payload}
     datas = payload.get("datas")
     if datas is None and isinstance(payload.get("result"), dict):
         nested = payload["result"]
-        datas = nested.get("datas")
+        datas = (
+            nested.get("datas")
+            or nested.get("list")
+            or nested.get("records")
+            or nested.get("dataList")
+        )
         payload = nested
     if datas is None and isinstance(payload.get("result"), list):
         datas = payload["result"]
+    if datas is None:
+        datas = (
+            payload.get("list")
+            or payload.get("records")
+            or payload.get("dataList")
+        )
     return {
         "datas": datas if isinstance(datas, list) else [],
         "totalCount": payload.get("totalCount") or payload.get("total") or 0,
@@ -403,6 +453,108 @@ async def _device_detail(client: TuyaPasswordClient, device_id: str) -> dict[str
     return {}
 
 
+def _resolve_unlock_dp_ids(
+    *,
+    dp_ids: list[int] | None,
+    schema_codes: dict[str, str] | None,
+    detail: dict[str, Any],
+) -> list[int]:
+    ids = list(dp_ids or [])
+    if not ids:
+        ids = _dp_ids_from_schema_codes(schema_codes, UNLOCK_CODE_HINTS)
+    if not ids:
+        ids = _dp_ids_for_codes(_schema_entries(detail), UNLOCK_CODE_HINTS)
+    if not ids:
+        parsed = _parse_cloud_schema(
+            detail.get("schema")
+            or detail.get("dpSchema")
+            or detail.get("schemaInfo")
+        )
+        ids = _dp_ids_from_schema_codes(parsed, UNLOCK_CODE_HINTS)
+    if not ids:
+        ids = list(DEFAULT_UNLOCK_DP_IDS)
+    return ids
+
+
+async def _call_unlock_history(
+    client: TuyaPasswordClient,
+    *,
+    device_id: str,
+    gid: str | None,
+    ids: list[int],
+    limit: int,
+    offset: int,
+) -> Any:
+    payloads: list[tuple[str, str, dict[str, Any]]] = [
+        (
+            "tuya.m.scale.history.list",
+            "2.0",
+            {
+                "devId": device_id,
+                "dpIds": ids,
+                "offset": offset,
+                "limit": limit,
+                "startTime": 0,
+                "endTime": 0,
+            },
+        ),
+        (
+            "tuya.m.scale.history.list",
+            "2.0",
+            {
+                "devId": device_id,
+                "dpIds": ids,
+                "offset": offset,
+                "limit": limit,
+                "startTime": "",
+                "endTime": "",
+            },
+        ),
+        (
+            "tuya.m.device.lock.history.list",
+            "2.0",
+            {
+                "devId": device_id,
+                "dpIds": ",".join(str(i) for i in ids),
+                "offset": offset,
+                "limit": limit,
+            },
+        ),
+        (
+            "m.smart.scale.history.get.list",
+            "1.0",
+            {
+                "devId": device_id,
+                "dpIds": ",".join(str(i) for i in ids),
+                "offset": offset,
+                "limit": limit,
+            },
+        ),
+    ]
+    last_err: Exception | None = None
+    for action, version, payload in payloads:
+        for with_gid in (True, False):
+            body = dict(payload)
+            if with_gid:
+                if not gid:
+                    continue
+                body["gid"] = gid
+            try:
+                return await client._call(action, body, version=version)
+            except Exception as err:
+                last_err = err
+                _LOGGER.debug(
+                    "history %s v%s gid=%s failed: %s",
+                    action,
+                    version,
+                    with_gid,
+                    err,
+                )
+    if last_err:
+        raise last_err
+    raise CloudApiError("unlock history failed")
+
+
 async def async_lock_unlock_history(
     *,
     username: str,
@@ -412,32 +564,32 @@ async def async_lock_unlock_history(
     session_data: dict[str, str] | None,
     device_id: str,
     dp_ids: list[int] | None = None,
+    schema_codes: dict[str, str] | None = None,
+    gid: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Unlock records via panel API tuya.m.scale.history.list."""
+    """Unlock records via panel/mobile lock history APIs."""
 
     async def _run(client: TuyaPasswordClient) -> dict[str, Any]:
-        ids = list(dp_ids or [])
-        if not ids:
-            detail = await _device_detail(client, device_id)
-            ids = _dp_ids_for_codes(_schema_entries(detail), UNLOCK_CODE_HINTS)
-        if not ids:
-            raise CloudApiError("no unlock dp ids found for device")
-        raw = await client._call(
-            "tuya.m.scale.history.list",
-            {
-                "devId": device_id,
-                "dpIds": ids,
-                "offset": offset,
-                "limit": limit,
-                "startTime": 0,
-                "endTime": 0,
-            },
-            version="2.0",
+        detail = await _device_detail(client, device_id)
+        ids = _resolve_unlock_dp_ids(
+            dp_ids=dp_ids,
+            schema_codes=schema_codes,
+            detail=detail,
+        )
+        home_gid = gid or detail.get("gid") or detail.get("groupId") or detail.get("homeId")
+        raw = await _call_unlock_history(
+            client,
+            device_id=device_id,
+            gid=str(home_gid) if home_gid else None,
+            ids=ids,
+            limit=limit,
+            offset=offset,
         )
         out = _normalize_history(raw)
         out["dp_ids"] = ids
+        out["gid"] = home_gid
         return out
 
     return await _with_client(
@@ -459,6 +611,8 @@ async def async_lock_alarm_history(
     session_data: dict[str, str] | None,
     device_id: str,
     dp_ids: list[int] | None = None,
+    schema_codes: dict[str, str] | None = None,
+    gid: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -466,19 +620,26 @@ async def async_lock_alarm_history(
 
     async def _run(client: TuyaPasswordClient) -> dict[str, Any]:
         ids = list(dp_ids or [])
+        detail: dict[str, Any] = {}
         if not ids:
             detail = await _device_detail(client, device_id)
-            ids = _dp_ids_for_codes(_schema_entries(detail), ALARM_CODE_HINTS)
+            ids = _dp_ids_from_schema_codes(schema_codes, ALARM_CODE_HINTS)
+            if not ids:
+                ids = _dp_ids_for_codes(_schema_entries(detail), ALARM_CODE_HINTS)
         if not ids:
-            raise CloudApiError("no alarm dp ids found for device")
+            ids = [12, 21, 24, 45, 46, 47, 48, 49, 50]
+        home_gid = gid or detail.get("gid") or detail.get("groupId")
+        payload: dict[str, Any] = {
+            "devId": device_id,
+            "dpIds": ids,
+            "offset": offset,
+            "limit": limit,
+        }
+        if home_gid:
+            payload["gid"] = str(home_gid)
         raw = await client._call(
             "tuya.m.device.lock.alarm.list",
-            {
-                "devId": device_id,
-                "dpIds": ids,
-                "offset": offset,
-                "limit": limit,
-            },
+            payload,
             version="1.0",
         )
         out = _normalize_history(raw)

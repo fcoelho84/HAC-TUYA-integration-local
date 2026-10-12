@@ -364,6 +364,18 @@ def classify_device(
         state_dp = _lock_state_dp(dps, dp, schema_codes)
         used = {x for x in (dp, state_dp) if x}
         battery_dp = _battery_dp(dps, used, schema_codes)
+        unlock_dp_ids: list[int] = []
+        for raw_dp, code in (schema_codes or {}).items():
+            text = str(code or "").lower()
+            if not (
+                text.startswith("unlock_")
+                or text in {"open_inside", "door_opened"}
+            ):
+                continue
+            try:
+                unlock_dp_ids.append(int(raw_dp))
+            except (TypeError, ValueError):
+                continue
         return {
             "kind": "lock",
             "lock_dp": dp,
@@ -371,6 +383,7 @@ def classify_device(
             "lock_controllable": bool(dp),
             "bool_dps": [],
             "battery_dp": battery_dp,
+            "unlock_dp_ids": sorted(set(unlock_dp_ids)),
             "schema_codes": schema_codes or {},
             "category": category,
         }
@@ -448,6 +461,8 @@ def _merge_device_record(
         **info,
         "needs_key": not bool(local_key),
     }
+    if cloud.get("gid"):
+        result["gid"] = cloud["gid"]
     final_name = name or cloud.get("name")
     if final_name:
         result["name"] = final_name

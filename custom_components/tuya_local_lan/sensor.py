@@ -161,6 +161,7 @@ class TuyaLastUnlockSensor(SensorEntity):
     async def async_update(self) -> None:
         if not self.available:
             return
+        info = self.coordinator.devices[self._device_id].info
         try:
             session, result = await async_lock_unlock_history(
                 username=self._entry.data[CONF_USERNAME],
@@ -172,17 +173,26 @@ class TuyaLastUnlockSensor(SensorEntity):
                 session_data=self.coordinator.session
                 or self._entry.data.get(CONF_SESSION),
                 device_id=self._device_id,
+                dp_ids=info.get("unlock_dp_ids"),
+                schema_codes=info.get("schema_codes"),
+                gid=info.get("gid"),
                 limit=1,
                 offset=0,
             )
-        except (CloudAuthError, CloudApiError) as err:
-            _LOGGER.debug("last unlock %s: %s", self._device_id, err)
+        except (CloudAuthError, CloudApiError, RuntimeError, OSError) as err:
+            _LOGGER.warning("last unlock %s: %s", self._device_id, err)
+            self._extra = {"last_error": str(err)}
             return
         self.coordinator.session = session
         datas = result.get("datas") or []
         if not datas:
             self._value = None
-            self._extra = {}
+            self._extra = {
+                "last_error": None,
+                "dp_ids": result.get("dp_ids"),
+                "gid": result.get("gid"),
+                "total_count": result.get("totalCount"),
+            }
             return
         row = datas[0] if isinstance(datas[0], dict) else {}
         unlock_name = row.get("unlockName") or row.get("unlock_name") or ""
@@ -203,5 +213,6 @@ class TuyaLastUnlockSensor(SensorEntity):
             "unlock_name": unlock_name or None,
             "user_name": user_name or None,
             "gmt_create": stamp,
+            "dp_ids": result.get("dp_ids"),
             "raw": row,
         }
