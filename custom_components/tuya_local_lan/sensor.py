@@ -85,17 +85,30 @@ class TuyaBatterySensor(CoordinatorEntity[TuyaLocalCoordinator], SensorEntity):
             model=info.get("product_key") or info.get("category") or "Local LAN",
         )
 
-    @property
-    def available(self) -> bool:
-        runtime = self.coordinator.devices.get(self._device_id)
-        return bool(runtime and runtime.available)
-
-    @property
-    def native_value(self) -> int | None:
+    def _raw_value(self) -> Any:
         data = (self.coordinator.data or {}).get(self._device_id) or {}
         value = data.get(self._dp)
         if value is None:
-            value = self.coordinator.devices[self._device_id].dps.get(self._dp)
+            runtime = self.coordinator.devices.get(self._device_id)
+            if runtime:
+                value = runtime.dps.get(self._dp)
+                if value is None:
+                    value = (runtime.info.get("dps") or {}).get(self._dp)
+        return value
+
+    @property
+    def available(self) -> bool:
+        # Fechadura dorme na LAN; bateria ainda vale se já temos valor (cloud/LAN).
+        runtime = self.coordinator.devices.get(self._device_id)
+        if not runtime:
+            return False
+        if self._raw_value() is not None:
+            return True
+        return bool(runtime.available)
+
+    @property
+    def native_value(self) -> int | None:
+        value = self._raw_value()
         if value is None:
             return None
         try:

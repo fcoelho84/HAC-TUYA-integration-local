@@ -25,7 +25,10 @@ async def async_setup_entry(
         if runtime.info.get("kind") != DEVICE_KIND_MULTI_SWITCH:
             continue
         bool_dps = list(runtime.info.get("bool_dps") or [])
-        for (key, name), dp in zip(switch_labels(bool_dps), bool_dps, strict=False):
+        schema_codes = runtime.info.get("schema_codes") or {}
+        for (key, name), dp in zip(
+            switch_labels(bool_dps, schema_codes), bool_dps, strict=False
+        ):
             entities.append(
                 TuyaLocalSwitch(coordinator, runtime.device_id, key, dp, name)
             )

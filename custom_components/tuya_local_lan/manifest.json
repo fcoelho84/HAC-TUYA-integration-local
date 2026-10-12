@@ -10,5 +10,5 @@
     "tuya-mobile>=1.2.0",
     "tinytuya>=1.17.0"
   ],
-  "version": "1.4.0"
+  "version": "1.4.1"
 }

@@ -5,6 +5,7 @@ from typing import Any
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -50,8 +51,9 @@ class TuyaLocalLock(CoordinatorEntity[TuyaLocalCoordinator], LockEntity):
         super().__init__(coordinator)
         self._device_id = device_id
         info = coordinator.devices[device_id].info
-        self._dp_cmd = str(info.get("lock_dp") or "1")
-        self._dp_state = str(info.get("lock_state_dp") or self._dp_cmd)
+        self._dp_cmd = info.get("lock_dp")
+        self._dp_state = info.get("lock_state_dp") or self._dp_cmd
+        self._controllable = bool(info.get("lock_controllable") and self._dp_cmd)
         self._attr_unique_id = f"{device_id}_lock"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
@@ -63,21 +65,32 @@ class TuyaLocalLock(CoordinatorEntity[TuyaLocalCoordinator], LockEntity):
     @property
     def available(self) -> bool:
         runtime = self.coordinator.devices.get(self._device_id)
-        return bool(runtime and runtime.available)
+        if not runtime:
+            return False
+        # Estado pode vir da nuvem mesmo com LAN dormindo.
+        if self._read_state_value() is not None:
+            return True
+        return bool(runtime.available and self._controllable)
 
     @property
     def is_locked(self) -> bool | None:
+        return _is_locked(self._read_state_value())
+
+    def _read_state_value(self) -> Any:
+        if not self._dp_state:
+            return None
+        dp = str(self._dp_state)
         data = (self.coordinator.data or {}).get(self._device_id) or {}
-        value = data.get(self._dp_state)
+        value = data.get(dp)
         if value is None:
-            value = self.coordinator.devices[self._device_id].dps.get(self._dp_state)
-        return _is_locked(value)
+            runtime = self.coordinator.devices[self._device_id]
+            value = runtime.dps.get(dp)
+            if value is None:
+                value = (runtime.info.get("dps") or {}).get(dp)
+        return value
 
     def _command_value(self, locked: bool) -> Any:
-        data = (self.coordinator.data or {}).get(self._device_id) or {}
-        current = data.get(self._dp_state)
-        if current is None:
-            current = self.coordinator.devices[self._device_id].dps.get(self._dp_state)
+        current = self._read_state_value()
         if isinstance(current, str):
             return "lock" if locked else "unlock"
         if isinstance(current, (int, float)) and not isinstance(current, bool):
@@ -85,11 +98,21 @@ class TuyaLocalLock(CoordinatorEntity[TuyaLocalCoordinator], LockEntity):
         return locked
 
     async def async_lock(self, **kwargs: Any) -> None:
+        if not self._controllable or not self._dp_cmd:
+            raise HomeAssistantError(
+                "esta fechadura não expõe DP local de trava "
+                "(comum em BLE/WiFi Tuya; unlock_* é só evento)"
+            )
         await self.coordinator.async_set_dp(
-            self._device_id, self._dp_cmd, self._command_value(True)
+            self._device_id, str(self._dp_cmd), self._command_value(True)
         )
 
     async def async_unlock(self, **kwargs: Any) -> None:
+        if not self._controllable or not self._dp_cmd:
+            raise HomeAssistantError(
+                "esta fechadura não expõe DP local de trava "
+                "(comum em BLE/WiFi Tuya; unlock_* é só evento)"
+            )
         await self.coordinator.async_set_dp(
-            self._device_id, self._dp_cmd, self._command_value(False)
+            self._device_id, str(self._dp_cmd), self._command_value(False)
         )

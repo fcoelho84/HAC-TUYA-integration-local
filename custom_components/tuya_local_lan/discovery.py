@@ -67,6 +67,43 @@ LOCK_NAME_HINTS = (
 )
 
 
+BATTERY_CODES = {
+    "residual_electricity",
+    "battery_percentage",
+    "battery",
+    "va_battery",
+    "batpercent",
+}
+BATTERY_STATE_CODES = {"battery_state"}
+LOCK_CONTROL_CODES = {
+    "lock_motor",
+    "lock_motor_state",
+    "closed_opened",
+    "lock",
+    "approve_unlock",
+    "remote_unlock",
+    "switch_lock",
+    "remote_no_dp_key",
+}
+LOCK_STATE_CODES = {
+    "lock_motor_state",
+    "closed_opened",
+    "door_opened",
+    "lock_state",
+    "lock",
+    "lock_motor",
+}
+SWITCH_EXCLUDE_CODES = {
+    "child_lock",
+    "switch_all",
+    "relay_status",
+    "switch_inching",
+    "countdown",
+    "cycle_time",
+    "random_time",
+}
+
+
 def _sorted_dp_ids(ids: list[str]) -> list[str]:
     return sorted(ids, key=lambda x: int(x) if x.isdigit() else x)
 
@@ -86,32 +123,123 @@ def _looks_like_switch_category(category: str | None) -> bool:
     return _category_token(category) in SWITCH_CATEGORIES
 
 
-def _switchable_dps(dps: dict[str, Any]) -> list[str]:
-    """All DPs that look on/off controllable (bool or exact 0/1)."""
+def _is_switch_code(code: str) -> bool:
+    text = code.lower().strip()
+    if not text or text in SWITCH_EXCLUDE_CODES:
+        return False
+    if text.startswith("countdown") or text.startswith("relay"):
+        return False
+    if text in {"switch", "socket", "outlet"}:
+        return True
+    if text.startswith("switch_") and text not in SWITCH_EXCLUDE_CODES:
+        return True
+    if text.startswith("socket") or text.startswith("outlet"):
+        return True
+    return False
+
+
+def _code_for(dp: str, schema_codes: dict[str, str] | None) -> str:
+    if not schema_codes:
+        return ""
+    return str(schema_codes.get(str(dp)) or "").lower()
+
+
+def _switchable_dps(
+    dps: dict[str, Any],
+    schema_codes: dict[str, str] | None = None,
+) -> list[str]:
+    """On/off channels. Prefer schema switch_* / socket; avoid junk bools."""
+    if schema_codes:
+        ids = [
+            str(dp)
+            for dp in dps
+            if _is_switch_code(_code_for(str(dp), schema_codes))
+        ]
+        if ids:
+            return _sorted_dp_ids(ids)
+        ids = [
+            dp
+            for dp, code in schema_codes.items()
+            if _is_switch_code(code)
+        ]
+        if ids:
+            return _sorted_dp_ids(ids)
+
     ids = [str(k) for k, v in dps.items() if isinstance(v, bool)]
     if not ids:
         ids = [
             str(k)
             for k, v in dps.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and int(v) in (0, 1)
+            if isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and int(v) in (0, 1)
         ]
-    return _sorted_dp_ids(ids)
+    ids = _sorted_dp_ids(ids)
+    # Classic 2 luzes + tomada: DPs 1/2/3. Extra bool often USB/backlight.
+    if len(ids) > 3 and all(dp in ids for dp in ("1", "2", "3")):
+        return ["1", "2", "3"]
+    return ids
 
 
-def _lock_command_dp(dps: dict[str, Any]) -> str | None:
+def _dp_by_codes(
+    schema_codes: dict[str, str] | None,
+    wanted: set[str],
+) -> str | None:
+    if not schema_codes:
+        return None
+    for dp, code in schema_codes.items():
+        if code.lower() in wanted:
+            return str(dp)
+    return None
+
+
+def _lock_command_dp(
+    dps: dict[str, Any],
+    schema_codes: dict[str, str] | None = None,
+) -> str | None:
+    # unlock_* are event records (tuya-local), not remote control.
+    by_code = _dp_by_codes(schema_codes, LOCK_CONTROL_CODES)
+    if by_code:
+        return by_code
     for key, value in dps.items():
+        code = _code_for(str(key), schema_codes)
+        if code.startswith("unlock_"):
+            continue
         if isinstance(value, str) and value.lower() in LOCK_STRINGS:
             return str(key)
-    switchable = _switchable_dps(dps)
-    return switchable[0] if switchable else None
+    return None
 
 
-def _battery_dp(dps: dict[str, Any], used: set[str]) -> str | None:
-    """Pick a numeric 0–100 DP that looks like battery percentage."""
+def _lock_state_dp(
+    dps: dict[str, Any],
+    command_dp: str | None,
+    schema_codes: dict[str, str] | None = None,
+) -> str | None:
+    by_code = _dp_by_codes(schema_codes, LOCK_STATE_CODES)
+    if by_code:
+        return by_code
+    return command_dp
+
+
+def _battery_dp(
+    dps: dict[str, Any],
+    used: set[str],
+    schema_codes: dict[str, str] | None = None,
+) -> str | None:
+    """Battery % DP. Prefer residual_electricity (tuya-local)."""
+    by_code = _dp_by_codes(schema_codes, BATTERY_CODES)
+    if by_code and by_code not in used:
+        return by_code
+
     candidates: list[tuple[int, str]] = []
     for key, value in dps.items():
         dp = str(key)
         if dp in used:
+            continue
+        code = _code_for(dp, schema_codes)
+        if code in BATTERY_STATE_CODES:
+            continue
+        if code.startswith("unlock_"):
             continue
         if isinstance(value, bool):
             continue
@@ -120,12 +248,18 @@ def _battery_dp(dps: dict[str, Any], used: set[str]) -> str | None:
         level = int(value)
         if level < 0 or level > 100:
             continue
-        # Prefer common Tuya battery DP ids, else any 0-100 leftover.
-        priority = 0 if dp in {"47", "56", "12", "11", "10", "9"} else 1
+        if code in BATTERY_CODES:
+            priority = -1
+        elif dp in {"8", "12", "47", "56", "11", "10", "9"}:
+            priority = 0
+        else:
+            priority = 1
         candidates.append((priority, dp))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (item[0], int(item[1]) if item[1].isdigit() else item[1]))
+    candidates.sort(
+        key=lambda item: (item[0], int(item[1]) if item[1].isdigit() else item[1])
+    )
     return candidates[0][1]
 
 
@@ -208,49 +342,118 @@ def classify_device(
     dps: dict[str, Any],
     name: str | None = None,
     category: str | None = None,
+    schema_codes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Detect lock vs switchable channels from DPs + cloud category/name."""
+    """Detect lock vs switchable channels from DPs + cloud category/schema."""
     as_lock = _looks_like_lock(name, category)
     if not as_lock:
         for value in dps.values():
             if isinstance(value, str) and value.lower() in LOCK_STRINGS:
                 as_lock = True
                 break
+    if not as_lock and schema_codes:
+        as_lock = any(
+            code.lower() in BATTERY_CODES
+            or code.lower().startswith("unlock_")
+            or code.lower() in LOCK_CONTROL_CODES
+            for code in schema_codes.values()
+        ) and not _looks_like_switch_category(category)
 
     if as_lock and not _looks_like_switch_category(category):
-        dp = _lock_command_dp(dps) or "1"
-        battery_dp = _battery_dp(dps, {dp})
+        dp = _lock_command_dp(dps, schema_codes)
+        state_dp = _lock_state_dp(dps, dp, schema_codes)
+        used = {x for x in (dp, state_dp) if x}
+        battery_dp = _battery_dp(dps, used, schema_codes)
         return {
             "kind": "lock",
             "lock_dp": dp,
-            "lock_state_dp": dp,
+            "lock_state_dp": state_dp,
+            "lock_controllable": bool(dp),
             "bool_dps": [],
             "battery_dp": battery_dp,
+            "schema_codes": schema_codes or {},
             "category": category,
         }
 
-    switch_dps = _switchable_dps(dps)
-    battery_dp = _battery_dp(dps, set(switch_dps))
+    switch_dps = _switchable_dps(dps, schema_codes)
+    battery_dp = _battery_dp(dps, set(switch_dps), schema_codes)
     return {
         "kind": "multi_switch",
         "bool_dps": switch_dps,
         "lock_dp": None,
         "lock_state_dp": None,
+        "lock_controllable": False,
         "battery_dp": battery_dp,
+        "schema_codes": schema_codes or {},
         "category": category,
     }
 
 
-def switch_labels(bool_dps: list[str]) -> list[tuple[str, str]]:
-    """Map each discovered DP to a generic channel label."""
+def switch_labels(
+    bool_dps: list[str],
+    schema_codes: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    """Map each discovered DP to a channel label."""
     out: list[tuple[str, str]] = []
     for idx, dp in enumerate(bool_dps):
-        if len(bool_dps) == 1:
+        code = _code_for(dp, schema_codes)
+        if "usb" in code or "socket" in code or "outlet" in code or "cz" in code:
+            name = "Tomada"
+        elif code.endswith("_1") or code in {"switch_1", "switch_led_1"}:
+            name = "Luz 1"
+        elif code.endswith("_2") or code in {"switch_2", "switch_led_2"}:
+            name = "Luz 2"
+        elif code.endswith("_3") or code in {"switch_3", "switch_led_3"}:
+            name = "Luz 3" if len(bool_dps) > 3 else "Tomada"
+        elif len(bool_dps) == 1:
             name = "Interruptor"
+        elif len(bool_dps) == 3 and idx == 2:
+            name = "Tomada"
+        elif len(bool_dps) >= 2 and idx < 2:
+            name = f"Luz {idx + 1}"
         else:
             name = f"Canal {idx + 1}"
         out.append((f"dp_{dp}", name))
     return out
+
+
+def _merge_device_record(
+    *,
+    device_id: str,
+    host: str,
+    local_key: str,
+    protocol_version: str,
+    product_key: Any,
+    lan_dps: dict[str, Any],
+    cloud: dict[str, Any],
+    name: str | None,
+    category: str | None,
+) -> dict[str, Any]:
+    cloud_dps = dict(cloud.get("dps") or {})
+    schema_codes = dict(cloud.get("schema_codes") or {})
+    merged = {**cloud_dps, **lan_dps}
+    info = classify_device(
+        merged,
+        name=name or cloud.get("name"),
+        category=category or cloud.get("category"),
+        schema_codes=schema_codes or None,
+    )
+    result = {
+        "device_id": device_id,
+        "host": host,
+        "local_key": local_key,
+        "protocol_version": protocol_version,
+        "product_key": product_key,
+        "dps": merged,
+        **info,
+        "needs_key": not bool(local_key),
+    }
+    final_name = name or cloud.get("name")
+    if final_name:
+        result["name"] = final_name
+    if category or cloud.get("category"):
+        result["category"] = category or cloud.get("category")
+    return result
 
 
 async def probe_device(
@@ -258,6 +461,7 @@ async def probe_device(
     local_key: str,
     name: str | None = None,
     category: str | None = None,
+    cloud: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Try LAN status across protocol versions; return enriched dict or None."""
     host = discovered.get("ip") or ""
@@ -269,6 +473,7 @@ async def probe_device(
     last_err: Exception | None = None
     device_name = name or discovered.get("name")
     device_category = category or discovered.get("category")
+    cloud = cloud or {}
 
     for version in versions:
         device = TuyaLanDevice(
@@ -292,23 +497,17 @@ async def probe_device(
             await device.disconnect()
             continue
         await device.disconnect()
-        info = classify_device(
-            dps or device.dps,
+        return _merge_device_record(
+            device_id=discovered["device_id"],
+            host=host,
+            local_key=local_key,
+            protocol_version=version,
+            product_key=discovered.get("product_key"),
+            lan_dps=dps or device.dps or {},
+            cloud=cloud,
             name=device_name,
             category=device_category,
         )
-        result = {
-            "device_id": discovered["device_id"],
-            "host": host,
-            "local_key": local_key,
-            "protocol_version": version,
-            "product_key": discovered.get("product_key"),
-            "dps": dps or device.dps,
-            **info,
-        }
-        if device_name:
-            result["name"] = device_name
-        return result
 
     if last_err:
         _LOGGER.warning(
@@ -352,32 +551,23 @@ async def async_scan_network(
             local_key,
             name=cloud.get("name"),
             category=cloud.get("category"),
+            cloud=cloud,
         )
         if probed is None:
-            fallback = classify_device(
-                {},
-                name=cloud.get("name"),
-                category=cloud.get("category"),
-            )
             results.append(
-                {
-                    "device_id": dev_id,
-                    "host": item["ip"],
-                    "local_key": local_key,
-                    "name": cloud.get("name"),
-                    "protocol_version": str(item.get("version") or "3.3"),
-                    "product_key": item.get("product_key"),
-                    "dps": {},
-                    **fallback,
-                    "needs_key": not bool(local_key),
-                }
+                _merge_device_record(
+                    device_id=dev_id,
+                    host=item["ip"],
+                    local_key=local_key,
+                    protocol_version=str(item.get("version") or "3.3"),
+                    product_key=item.get("product_key"),
+                    lan_dps={},
+                    cloud=cloud,
+                    name=cloud.get("name"),
+                    category=cloud.get("category"),
+                )
             )
             continue
-        probed["needs_key"] = not bool(local_key)
-        if cloud.get("name"):
-            probed["name"] = cloud["name"]
-        if cloud.get("category"):
-            probed["category"] = cloud["category"]
         results.append(probed)
 
     for device_id, cloud in cloud_by_id.items():
@@ -390,23 +580,18 @@ async def async_scan_network(
             host = cloud_ip
         local_key = str(cloud.get("local_key") or keyring.get(device_id) or "")
         if not host:
-            fallback = classify_device(
-                {},
-                name=cloud.get("name"),
-                category=cloud.get("category"),
-            )
             results.append(
-                {
-                    "device_id": device_id,
-                    "host": "",
-                    "local_key": local_key,
-                    "name": cloud.get("name"),
-                    "protocol_version": "3.3",
-                    "product_key": None,
-                    "dps": {},
-                    **fallback,
-                    "needs_key": not bool(local_key),
-                }
+                _merge_device_record(
+                    device_id=device_id,
+                    host="",
+                    local_key=local_key,
+                    protocol_version="3.3",
+                    product_key=None,
+                    lan_dps={},
+                    cloud=cloud,
+                    name=cloud.get("name"),
+                    category=cloud.get("category"),
+                )
             )
             continue
         discovered = {
@@ -422,32 +607,23 @@ async def async_scan_network(
             local_key,
             name=cloud.get("name"),
             category=cloud.get("category"),
+            cloud=cloud,
         )
         if probed is None:
-            fallback = classify_device(
-                {},
-                name=cloud.get("name"),
-                category=cloud.get("category"),
-            )
             results.append(
-                {
-                    "device_id": device_id,
-                    "host": host,
-                    "local_key": local_key,
-                    "name": cloud.get("name"),
-                    "protocol_version": "3.3",
-                    "product_key": None,
-                    "dps": {},
-                    **fallback,
-                    "needs_key": not bool(local_key),
-                }
+                _merge_device_record(
+                    device_id=device_id,
+                    host=host,
+                    local_key=local_key,
+                    protocol_version="3.3",
+                    product_key=None,
+                    lan_dps={},
+                    cloud=cloud,
+                    name=cloud.get("name"),
+                    category=cloud.get("category"),
+                )
             )
             continue
-        probed["needs_key"] = not bool(local_key)
-        if cloud.get("name"):
-            probed["name"] = cloud["name"]
-        if cloud.get("category"):
-            probed["category"] = cloud["category"]
         results.append(probed)
 
     return results

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
@@ -158,6 +159,47 @@ async def async_list_with_session(
         return _session_dict(mobile), devices
 
 
+def _parse_cloud_dps(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        out[str(key)] = value
+    return out
+
+
+def _parse_cloud_schema(raw: Any) -> dict[str, str]:
+    """Map dp id -> code from cloud schema / product metadata."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    entries: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        entries = [item for item in raw if isinstance(item, dict)]
+    elif isinstance(raw, dict):
+        nested = raw.get("schema") or raw.get("dpSchema") or raw.get("properties")
+        if isinstance(nested, (list, dict, str)):
+            return _parse_cloud_schema(nested)
+        entries = _schema_entries(raw)
+    codes: dict[str, str] = {}
+    for entry in entries:
+        code = str(entry.get("code") or entry.get("dpCode") or "").strip()
+        raw_id = entry.get("id") or entry.get("dpId") or entry.get("dp_id")
+        if not code or raw_id is None:
+            continue
+        codes[str(raw_id)] = code
+    return codes
+
+
 async def _list_devices(client: TuyaPasswordClient) -> list[dict[str, Any]]:
     homes = await client._call("m.life.home.space.list", {})
     gids = {
@@ -175,6 +217,14 @@ async def _list_devices(client: TuyaPasswordClient) -> list[dict[str, Any]]:
             device_id = obj.get("devId") or obj.get("deviceId") or obj.get("id")
             if not local_key or not device_id:
                 continue
+            schema_raw = (
+                obj.get("schema")
+                or obj.get("dpSchema")
+                or (obj.get("productBean") or {}).get("schemaInfo")
+                or (obj.get("product") or {}).get("schema")
+            )
+            dps = _parse_cloud_dps(obj.get("dps") or obj.get("dpsData") or obj.get("status"))
+            schema_codes = _parse_cloud_schema(schema_raw)
             records.append(
                 {
                     "device_id": str(device_id),
@@ -191,12 +241,49 @@ async def _list_devices(client: TuyaPasswordClient) -> list[dict[str, Any]]:
                     ),
                     "product_id": obj.get("productId") or obj.get("product_id"),
                     "product_name": obj.get("productName") or obj.get("product_name"),
+                    "dps": dps,
+                    "schema_codes": schema_codes,
                 }
             )
     unique = {
         (item["device_id"], item["local_key"]): item for item in records
     }
-    return list(unique.values())
+    out = list(unique.values())
+    for item in out:
+        if item.get("schema_codes") and item.get("dps"):
+            continue
+        category = str(item.get("category") or "").lower()
+        name = str(item.get("name") or "").lower()
+        wants_schema = (
+            category in {"ms", "jtmspro", "videolock", "photolock", "lock", "smartlock", "mk"}
+            or "lock" in name
+            or "fechadura" in name
+            or not item.get("schema_codes")
+        )
+        if not wants_schema:
+            continue
+        try:
+            detail = await _device_detail(client, item["device_id"])
+        except Exception as err:
+            _LOGGER.debug("enrich %s failed: %s", item["device_id"], err)
+            continue
+        if not item.get("dps"):
+            item["dps"] = _parse_cloud_dps(
+                detail.get("dps") or detail.get("status") or detail.get("dpsData")
+            )
+        if not item.get("schema_codes"):
+            item["schema_codes"] = _parse_cloud_schema(
+                detail.get("schema")
+                or detail.get("dpSchema")
+                or detail.get("schemaInfo")
+            )
+        if not item.get("category"):
+            item["category"] = (
+                detail.get("category")
+                or detail.get("categoryCode")
+                or item.get("category")
+            )
+    return out
 
 
 async def _with_client(
